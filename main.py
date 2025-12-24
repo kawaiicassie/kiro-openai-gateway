@@ -45,6 +45,8 @@ from kiro_gateway.config import (
     PROFILE_ARN,
     REGION,
     KIRO_CREDS_FILE,
+    KIRO_CREDS_JSON,
+    SKIP_ENV_FILE_CHECK,
     PROXY_API_KEY,
     LOG_LEVEL,
     _warn_deprecated_debug_setting,
@@ -124,19 +126,19 @@ def validate_configuration() -> None:
     Validates that required configuration is present.
     
     Checks:
-    - .env file exists
-    - Either REFRESH_TOKEN or KIRO_CREDS_FILE is configured
+    - .env file exists (unless SKIP_ENV_FILE_CHECK is set)
+    - Either REFRESH_TOKEN, KIRO_CREDS_FILE, or KIRO_CREDS_JSON is configured
     
     Raises:
         SystemExit: If critical configuration is missing
     """
     errors = []
     
-    # Check if .env file exists
+    # Check if .env file exists (skip if SKIP_ENV_FILE_CHECK is set for VPS deployment)
     env_file = Path(".env")
-    env_example = Path(".env.example")
+    env_file_exists = env_file.exists()
     
-    if not env_file.exists():
+    if not env_file_exists and not SKIP_ENV_FILE_CHECK:
         errors.append(
             ".env file not found!\n"
             "\n"
@@ -150,12 +152,16 @@ def validate_configuration() -> None:
             "      - 1 way: KIRO_CREDS_FILE to your Kiro credentials JSON file\n"
             "      - 2 way: REFRESH_TOKEN from Kiro IDE traffic\n"
             "\n"
+            "For VPS deployment (Zeabur, Railway, etc.):\n"
+            "   Set SKIP_ENV_FILE_CHECK=true and configure via environment variables.\n"
+            "\n"
             "See README.md for detailed instructions."
         )
     else:
-        # .env exists, check for credentials
+        # .env exists OR we're in VPS mode, check for credentials
         has_refresh_token = bool(REFRESH_TOKEN)
         has_creds_file = bool(KIRO_CREDS_FILE)
+        has_creds_json = bool(KIRO_CREDS_JSON)
         
         # Check if creds file actually exists
         if KIRO_CREDS_FILE:
@@ -164,19 +170,22 @@ def validate_configuration() -> None:
                 has_creds_file = False
                 logger.warning(f"KIRO_CREDS_FILE not found: {KIRO_CREDS_FILE}")
         
-        if not has_refresh_token and not has_creds_file:
+        if not has_refresh_token and not has_creds_file and not has_creds_json:
             errors.append(
                 "No Kiro credentials configured!\n"
                 "\n"
-                "   Configure one of the following in your .env file:\n"
+                "   Configure one of the following:\n"
                 "\n"
                 "Set you super-secret password as PROXY_API_KEY\n"
                 "   PROXY_API_KEY=\"my-super-secret-password-123\"\n"
                 "\n"
-                "   Option 1 (Recommended): JSON credentials file\n"
+                "   Option 1 (Recommended for local): JSON credentials file\n"
                 "      KIRO_CREDS_FILE=\"path/to/your/kiro-credentials.json\"\n"
                 "\n"
-                "   Option 2: Refresh token\n"
+                "   Option 2 (Recommended for VPS): JSON credentials as env var\n"
+                "      KIRO_CREDS_JSON='{\"refreshToken\":\"...\",\"accessToken\":\"...\"}'\n"
+                "\n"
+                "   Option 3: Refresh token only\n"
                 "      REFRESH_TOKEN=\"your_refresh_token_here\"\n"
                 "\n"
                 "   See README.md for how to obtain credentials."
@@ -196,10 +205,15 @@ def validate_configuration() -> None:
         sys.exit(1)
     
     # Log successful configuration
-    if KIRO_CREDS_FILE:
+    if SKIP_ENV_FILE_CHECK:
+        logger.info("VPS mode: skipping .env file check")
+    if KIRO_CREDS_JSON:
+        logger.info("Using credentials from KIRO_CREDS_JSON environment variable")
+    elif KIRO_CREDS_FILE:
         logger.info(f"Using credentials file: {KIRO_CREDS_FILE}")
     elif REFRESH_TOKEN:
         logger.info("Using refresh token from environment")
+
 
 
 # Run configuration validation on import
@@ -229,7 +243,8 @@ async def lifespan(app: FastAPI):
         refresh_token=REFRESH_TOKEN,
         profile_arn=PROFILE_ARN,
         region=REGION,
-        creds_file=KIRO_CREDS_FILE if KIRO_CREDS_FILE else None
+        creds_file=KIRO_CREDS_FILE if KIRO_CREDS_FILE else None,
+        creds_json=KIRO_CREDS_JSON if KIRO_CREDS_JSON else None
     )
     
     # Create model cache
