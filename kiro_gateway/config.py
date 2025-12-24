@@ -104,6 +104,19 @@ _raw_creds_file = _get_raw_env_value("KIRO_CREDS_FILE") or os.getenv("KIRO_CREDS
 KIRO_CREDS_FILE: str = str(Path(_raw_creds_file)) if _raw_creds_file else ""
 
 # ==================================================================================================
+# VPS Deployment Settings
+# ==================================================================================================
+
+# Skip .env file existence check (useful for VPS platforms like Zeabur, Railway, etc.)
+# When set to "true", the application will only check environment variables, not .env file
+SKIP_ENV_FILE_CHECK: bool = os.getenv("SKIP_ENV_FILE_CHECK", "").lower() in ("true", "1", "yes")
+
+# JSON credentials as environment variable (alternative to KIRO_CREDS_FILE for VPS deployment)
+# Set this to the full JSON content of your credentials file
+# Example: KIRO_CREDS_JSON='{"refreshToken":"...","accessToken":"...","profileArn":"..."}'
+KIRO_CREDS_JSON: str = os.getenv("KIRO_CREDS_JSON", "")
+
+# ==================================================================================================
 # Kiro API URL Templates
 # ==================================================================================================
 
