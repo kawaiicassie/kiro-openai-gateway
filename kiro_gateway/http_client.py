@@ -188,6 +188,12 @@ class KiroHttpClient:
                 # 5xx - server error, wait and retry
                 if 500 <= response.status_code < 600:
                     delay = BASE_RETRY_DELAY * (2 ** attempt)
+                    # Log response body for debugging 500 errors
+                    try:
+                        error_body = response.text[:500]  # First 500 chars
+                        logger.warning(f"Received {response.status_code}, body: {error_body}")
+                    except:
+                        pass
                     logger.warning(f"Received {response.status_code}, waiting {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
                     await asyncio.sleep(delay)
                     continue
