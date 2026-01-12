@@ -1,18 +1,37 @@
 <div align="center">
 
-# 🚀 Kiro OpenAI Gateway
+# 👻 Kiro Gateway
 
-**OpenAI-compatible proxy gateway for Kiro IDE API (AWS CodeWhisperer)**
+**Proxy gateway for Kiro API (AWS CodeWhisperer)**
+
+Made with ❤️ by [@Jwadow](https://github.com/jwadow)
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
+[![Sponsor](https://img.shields.io/badge/💖_Sponsor-Support_Development-ff69b4)](https://app.lava.top/jwadow)
 
-*Use Claude models through any tools that support the OpenAI API*
+*Use Claude models through any OpenAI or Anthropic compatible tool*
 
-[Features](#-features) • [Quick Start](#-quick-start) • [Configuration](#%EF%B8%8F-configuration) • [API Reference](#-api-reference) • [License](#-license)
+[Models](#-supported-models) • [Features](#-features) • [Quick Start](#-quick-start) • [Configuration](#%EF%B8%8F-configuration) • [💖 Sponsor](#-support-the-project)
 
 </div>
+
+---
+
+## 🤖 Supported Models
+
+🧠 **Claude Opus 4.5** — The most powerful model. Best for complex reasoning, deep analysis, and research tasks.
+
+🚀 **Claude Sonnet 4.5** — Balanced performance. Great for coding, writing, and general-purpose tasks.
+
+⚡ **Claude Haiku 4.5** — Lightning fast. Perfect for quick responses, simple tasks, and chat.
+
+📦 **Claude Sonnet 4** — Previous generation. Still powerful and reliable for most use cases.
+
+📦 **Claude 3.7 Sonnet** — Legacy model. Available for backward compatibility.
+
+> 💡 **Smart Model Resolution:** Use any model name format — `claude-sonnet-4-5`, `claude-sonnet-4.5`, or even versioned names like `claude-sonnet-4-5-20250929`. The gateway normalizes them automatically.
 
 ---
 
@@ -20,10 +39,12 @@
 
 | Feature | Description |
 |---------|-------------|
-| 🔌 **OpenAI-compatible API** | Works with any OpenAI client out of the box |
-| 🧠 **Extended Thinking** | See how the model reasons before answering |
+| 🔌 **OpenAI-compatible API** | Works with any OpenAI-compatible tool |
+| 🔌 **Anthropic-compatible API** | Native `/v1/messages` endpoint |
+| 🧠 **Extended Thinking** | Reasoning is exclusive to our project |
+| 👁️ **Vision Support** | Send images to model |
+| 🛠️ **Tool Calling** | Supports function calling |
 | 💬 **Full message history** | Passes complete conversation context |
-| 🛠️ **Tool Calling** | Supports function calling in OpenAI format |
 | 📡 **Streaming** | Full SSE streaming support |
 | 🔄 **Retry Logic** | Automatic retries on errors (403, 429, 5xx) |
 | 📋 **Extended model list** | Including versioned models |
@@ -43,19 +64,24 @@
 ### Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/Jwadow/kiro-openai-gateway.git
-cd kiro-openai-gateway
+# Clone the repository (requires Git)
+git clone https://github.com/Jwadow/kiro-gateway.git
+cd kiro-gateway
+
+# Or download ZIP: Code → Download ZIP → extract → open kiro-gateway folder
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Configure (see Configuration section)
 cp .env.example .env
-# Edit .env with your credentials
+# Copy and edit .env with your credentials
 
 # Start the server
 python main.py
+
+# Or with custom port (if 8000 is busy)
+python main.py --port 9000
 ```
 
 The server will be available at `http://localhost:8000`
@@ -215,24 +241,14 @@ If you need to manually extract the refresh token (e.g., for debugging), you can
 | `/` | GET | Health check |
 | `/health` | GET | Detailed health check |
 | `/v1/models` | GET | List available models |
-| `/v1/chat/completions` | POST | Chat completions |
-
-### Available Models
-
-| Model | Description |
-|-------|-------------|
-| `claude-opus-4-5` | Top-tier model |
-| `claude-opus-4-5-20251101` | Top-tier model (versioned) |
-| `claude-sonnet-4-5` | Enhanced model |
-| `claude-sonnet-4-5-20250929` | Enhanced model (versioned) |
-| `claude-sonnet-4` | Balanced model |
-| `claude-sonnet-4-20250514` | Balanced model (versioned) |
-| `claude-haiku-4-5` | Fast model |
-| `claude-3-7-sonnet-20250219` | Legacy model |
+| `/v1/chat/completions` | POST | OpenAI Chat Completions API |
+| `/v1/messages` | POST | Anthropic Messages API |
 
 ---
 
 ## 💡 Usage Examples
+
+### OpenAI API
 
 <details>
 <summary>🔹 Simple cURL Request</summary>
@@ -272,7 +288,7 @@ curl http://localhost:8000/v1/chat/completions \
 </details>
 
 <details>
-<summary>🔹 With Tool Calling</summary>
+<summary>🛠️ With Tool Calling</summary>
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -345,6 +361,96 @@ print(response.content)
 
 </details>
 
+### Anthropic API
+
+<details>
+<summary>🔹 Simple cURL Request</summary>
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "x-api-key: my-super-secret-password-123" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+> **Note:** Anthropic API uses `x-api-key` header instead of `Authorization: Bearer`. Both are supported.
+
+</details>
+
+<details>
+<summary>🔹 With System Prompt</summary>
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "x-api-key: my-super-secret-password-123" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 1024,
+    "system": "You are a helpful assistant.",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+> **Note:** In Anthropic API, `system` is a separate field, not a message.
+
+</details>
+
+<details>
+<summary>📡 Streaming</summary>
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "x-api-key: my-super-secret-password-123" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 1024,
+    "stream": true,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+</details>
+
+<details>
+<summary>🐍 Python Anthropic SDK</summary>
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(
+    api_key="my-super-secret-password-123",  # Your PROXY_API_KEY from .env
+    base_url="http://localhost:8000"
+)
+
+# Non-streaming
+response = client.messages.create(
+    model="claude-sonnet-4-5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(response.content[0].text)
+
+# Streaming
+with client.messages.stream(
+    model="claude-sonnet-4-5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}]
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+</details>
+
 ---
 
 ## 🔧 Debugging
@@ -408,9 +514,35 @@ By submitting a contribution to this project, you agree to the terms of our [Con
 
 ---
 
-## 👤 Author
+## 💖 Support the Project
 
-**Jwadow** — [@Jwadow](https://github.com/jwadow)
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Smilies/Smiling%20Face%20with%20Hearts.png" alt="Love" width="80" />
+
+**If this project saved you time or money, consider supporting it!**
+
+Every contribution helps keep this project alive and growing
+
+<br>
+
+### 🤑 Donate
+
+[**☕ One-time Donation**](https://app.lava.top/jwadow?tabId=donate) &nbsp;•&nbsp; [**💎 Monthly Support**](https://app.lava.top/jwadow?tabId=subscriptions)
+
+<br>
+
+### 🪙 Or send crypto
+
+| Currency | Network | Address |
+|:--------:|:-------:|:--------|
+| **USDT** | TRC20 | `TSVtgRc9pkC1UgcbVeijBHjFmpkYHDRu26` |
+| **BTC** | Bitcoin | `12GZqxqpcBsqJ4Vf1YreLqwoMGvzBPgJq6` |
+| **ETH** | Ethereum | `0xc86eab3bba3bbaf4eb5b5fff8586f1460f1fd395` |
+| **SOL** | Solana | `9amykF7KibZmdaw66a1oqYJyi75fRqgdsqnG66AK3jvh` |
+| **TON** | TON | `UQBVh8T1H3GI7gd7b-_PPNnxHYYxptrcCVf3qQk5v41h3QTM` |
+
+</div>
 
 ---
 
@@ -422,6 +554,6 @@ This project is not affiliated with, endorsed by, or sponsored by Amazon Web Ser
 
 <div align="center">
 
-**[⬆ Back to Top](#-kiro-openai-gateway)**
+**[⬆ Back to Top](#-kiro-gateway)**
 
 </div>

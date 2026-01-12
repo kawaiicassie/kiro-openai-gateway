@@ -1,40 +1,104 @@
-# Architectural Overview: Kiro OpenAI Gateway
+# Architectural Overview: Kiro Gateway
 
 ## 1. System Purpose and Goals
 
 The project is a high-level proxy gateway implementing the **"Adapter"** structural design pattern.
 
-The main goal of the system is to provide transparent compatibility between two heterogeneous interfaces:
-1.  **Target Interface (Client):** Standard OpenAI API protocol (endpoints `/v1/models`, `/v1/chat/completions`).
-2.  **Adaptee (Provider):** Internal Kiro IDE API (AWS CodeWhisperer), discovered in the Amazon Kiro ecosystem.
+The main goal of the system is to provide transparent compatibility between multiple heterogeneous interfaces:
 
-The system acts as a "translator", allowing the use of any tools, libraries, and IDE plugins developed for the OpenAI ecosystem with Claude models through the Kiro API.
+### Supported API Formats
+
+| API | Endpoints | Status |
+|-----|-----------|--------|
+| **OpenAI** | `/v1/models`, `/v1/chat/completions` | ✅ Supported |
+| **Anthropic** | `/v1/messages` | ✅ Supported |
+
+### Architectural Model
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                          Clients                                │
+│  ┌─────────────────────┐       ┌─────────────────────┐         │
+│  │  OpenAI SDK/Tools   │       │ Anthropic SDK/Tools │         │
+│  │  (Cursor, Cline,    │       │ (Claude Code,       │         │
+│  │   Continue, etc.)   │       │  Anthropic SDK)     │         │
+│  └──────────┬──────────┘       └──────────┬──────────┘         │
+└─────────────┼──────────────────────────────┼───────────────────┘
+              │                              │
+              ▼                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Kiro Gateway                               │
+│  ┌─────────────────────┐       ┌─────────────────────┐         │
+│  │  OpenAI Adapter     │       │  Anthropic Adapter  │         │
+│  │  /v1/chat/...       │       │  /v1/messages       │         │
+│  └──────────┬──────────┘       └──────────┬──────────┘         │
+│             └──────────────┬───────────────┘                    │
+│                            ▼                                    │
+│             ┌─────────────────────────────┐                     │
+│             │      Core Layer             │                     │
+│             │  (Shared conversion logic)  │                     │
+│             └──────────────┬──────────────┘                     │
+└────────────────────────────┼────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        Kiro API                                 │
+│              (AWS CodeWhisperer Backend)                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The system acts as a "translator", allowing the use of any tools, libraries, and IDE plugins developed for OpenAI and Anthropic ecosystems with Claude models through the Kiro API.
+
+**Both APIs work simultaneously** on the same server without any configuration switching.
 
 ## 2. Project Structure
 
-The project is organized as a modular Python package `kiro_gateway/`:
+The project is organized as a modular Python package `kiro/`:
 
 ```
-kiro-openai-gateway/
+kiro-gateway/
 ├── main.py                    # Entry point, FastAPI application creation
 ├── requirements.txt           # Python dependencies
 ├── .env.example               # Environment configuration example
 │
-├── kiro_gateway/              # Main package
+├── kiro/              # Main package
 │   ├── __init__.py            # Package exports, version
+│   │
+│   │   # ═══════════════════════════════════════════════════════
+│   │   # SHARED LAYER - Reused by all APIs
+│   │   # ═══════════════════════════════════════════════════════
 │   ├── config.py              # Configuration and constants
-│   ├── models.py              # Pydantic models for OpenAI API
 │   ├── auth.py                # KiroAuthManager - token management
 │   ├── cache.py               # ModelInfoCache - model cache
-│   ├── utils.py               # Helper utilities
-│   ├── converters.py          # OpenAI <-> Kiro conversion
-│   ├── parsers.py             # AWS SSE stream parsers
-│   ├── streaming.py           # Response streaming logic
 │   ├── http_client.py         # HTTP client with retry logic
-│   ├── routes.py              # FastAPI routes
-│   ├── debug_logger.py        # Debug request logging
+│   ├── parsers.py             # AWS SSE stream parsers
+│   ├── utils.py               # Helper utilities
 │   ├── tokenizer.py           # Token counting (tiktoken)
-│   └── exceptions.py          # Exception handlers
+│   ├── debug_logger.py        # Debug request logging
+│   ├── exceptions.py          # Exception handlers
+│   ├── thinking_parser.py     # Thinking blocks parser
+│   │
+│   │   # ═══════════════════════════════════════════════════════
+│   │   # CORE LAYER - Shared core for all APIs
+│   │   # ═══════════════════════════════════════════════════════
+│   ├── converters_core.py     # Shared Kiro payload building logic
+│   ├── streaming_core.py      # Shared Kiro stream parsing logic
+│   │
+│   │   # ═══════════════════════════════════════════════════════
+│   │   # OPENAI API LAYER
+│   │   # ═══════════════════════════════════════════════════════
+│   ├── models_openai.py       # Pydantic models for OpenAI API
+│   ├── converters_openai.py   # OpenAI → Kiro adapter
+│   ├── routes_openai.py       # FastAPI routes for OpenAI
+│   ├── streaming_openai.py    # Kiro → OpenAI SSE formatter
+│   │
+│   │   # ═══════════════════════════════════════════════════════
+│   │   # ANTHROPIC API LAYER
+│   │   # ═══════════════════════════════════════════════════════
+│   ├── models_anthropic.py    # Pydantic models for Anthropic API
+│   ├── converters_anthropic.py # Anthropic → Kiro adapter
+│   ├── routes_anthropic.py    # FastAPI routes for Anthropic
+│   └── streaming_anthropic.py # Kiro → Anthropic SSE formatter
 │
 ├── tests/                     # Tests
 │   ├── conftest.py            # Pytest fixtures
@@ -47,6 +111,16 @@ kiro-openai-gateway/
 │
 └── debug_logs/                # Debug logs (generated when DEBUG_LAST_REQUEST=true)
 ```
+
+### Organization Principle: Shared Core + Thin Adapters
+
+The architecture is built on the principle of **maximum code reuse**:
+
+| Layer | Purpose | Files |
+|-------|---------|-------|
+| **Shared Layer** | Infrastructure independent of API format | `auth.py`, `http_client.py`, `cache.py`, `parsers.py`, `tokenizer.py` |
+| **Core Layer** | Shared business logic for conversion | `converters_core.py`, `streaming_core.py` |
+| **API Layer** | Thin adapters for specific formats | `*_openai.py`, `*_anthropic.py` |
 
 ## 3. Architectural Topology and Components
 
@@ -66,7 +140,7 @@ The `main.py` file is responsible for:
 4. **Error handler registration** — `validation_exception_handler` for 422 errors
 5. **Route connection** — `app.include_router(router)`
 
-### 3.2. Configuration Module (`kiro_gateway/config.py`)
+### 3.2. Configuration Module (`kiro/config.py`)
 
 Centralized storage of all settings:
 
@@ -93,7 +167,7 @@ Centralized storage of all settings:
 - `get_kiro_q_host(region)` — Q API host
 - `get_internal_model_id(external_model)` — model name conversion
 
-### 3.3. Pydantic Models (`kiro_gateway/models.py`)
+### 3.3. Pydantic Models (`kiro/models_openai.py`)
 
 #### Models for `/v1/models`
 
@@ -124,7 +198,7 @@ Centralized storage of all settings:
 
 ### 3.4. State Management Layer
 
-#### KiroAuthManager (`kiro_gateway/auth.py`)
+#### KiroAuthManager (`kiro/auth.py`)
 
 **Role:** Stateful singleton encapsulating Kiro token management logic.
 
@@ -160,7 +234,7 @@ auth_manager = KiroAuthManager(
 token = await auth_manager.get_access_token()
 ```
 
-#### ModelInfoCache (`kiro_gateway/cache.py`)
+#### ModelInfoCache (`kiro/cache.py`)
 
 **Role:** Thread-safe storage for model configurations.
 
@@ -176,7 +250,7 @@ token = await auth_manager.get_access_token()
 - `is_empty()` / `is_stale()` — cache state check
 - `get_all_model_ids()` — list of all model IDs
 
-### 3.5. Helper Utilities (`kiro_gateway/utils.py`)
+### 3.5. Helper Utilities (`kiro/utils.py`)
 
 | Function | Description |
 |----------|-------------|
@@ -186,7 +260,7 @@ token = await auth_manager.get_access_token()
 | `generate_conversation_id()` | UUID for conversation |
 | `generate_tool_call_id()` | ID in format `call_{uuid_hex[:8]}` |
 
-### 3.6. Conversion Layer (`kiro_gateway/converters.py`)
+### 3.6. Conversion Layer (`kiro/converters_openai.py`)
 
 #### Message Conversion
 
@@ -236,7 +310,7 @@ External model names are converted to internal Kiro IDs:
 | `claude-3-7-sonnet-20250219` | `CLAUDE_3_7_SONNET_20250219_V1_0` |
 | `auto` | `claude-sonnet-4.5` (alias) |
 
-### 3.7. Parsing Layer (`kiro_gateway/parsers.py`)
+### 3.7. Parsing Layer (`kiro/parsers.py`)
 
 #### AwsEventStreamParser
 
@@ -266,7 +340,7 @@ Advanced AWS SSE format parser with support for:
 | `parse_bracket_tool_calls(response_text)` | Parse `[Called func with args: {...}]` |
 | `deduplicate_tool_calls(tool_calls)` | Remove duplicate tool calls |
 
-### 3.8. Streaming (`kiro_gateway/streaming.py`)
+### 3.8. Streaming (`kiro/streaming_openai.py`)
 
 #### stream_kiro_to_openai
 
@@ -283,7 +357,7 @@ Async generator for transforming Kiro stream to OpenAI format.
 
 Collects full response from streaming for non-streaming mode.
 
-### 3.9. HTTP Client (`kiro_gateway/http_client.py`)
+### 3.9. HTTP Client (`kiro/http_client.py`)
 
 #### KiroHttpClient
 
@@ -304,7 +378,7 @@ Automatic error handling with exponential backoff:
 
 Supports async context manager (`async with`).
 
-### 3.10. Routes (`kiro_gateway/routes.py`)
+### 3.10. Routes (`kiro/routes_openai.py`)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -315,14 +389,14 @@ Supports async context manager (`async with`).
 
 **Authentication:** Bearer token in `Authorization` header
 
-### 3.11. Exception Handling (`kiro_gateway/exceptions.py`)
+### 3.11. Exception Handling (`kiro/exceptions.py`)
 
 | Function | Description |
 |----------|-------------|
 | `sanitize_validation_errors(errors)` | Convert bytes to strings for JSON serialization |
 | `validation_exception_handler(request, exc)` | Pydantic validation error handler (422) |
 
-### 3.12. Debug Logging (`kiro_gateway/debug_logger.py`)
+### 3.12. Debug Logging (`kiro/debug_logger.py`)
 
 **Class:** `DebugLogger` (singleton)
 
@@ -343,7 +417,7 @@ Supports async context manager (`async with`).
 - `response_stream_raw.txt` — raw stream from Kiro
 - `response_stream_modified.txt` — transformed stream (OpenAI format)
 
-### 3.13. Tokenizer (`kiro_gateway/tokenizer.py`)
+### 3.13. Tokenizer (`kiro/tokenizer.py`)
 
 **Problem:** Kiro API does not return token counts directly. Instead, the API only provides `context_usage_percentage` — the percentage of model context usage.
 
@@ -388,56 +462,147 @@ All URLs are dynamically formed based on the region:
 
 ## 4. Detailed Data Flow
 
+### 4.1 Multi-API Overview
+
 ```
-┌─────────────────┐
-│  OpenAI Client  │
-└────────┬────────┘
-         │ POST /v1/chat/completions
-         ▼
-┌─────────────────┐
-│  Security Gate  │ ◄── Proxy Bearer token verification
-│  (routes.py)    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ KiroAuthManager │ ◄── Get/refresh accessToken
-│   (auth.py)     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Payload Builder │ ◄── Convert OpenAI → Kiro format
-│ (converters.py) │     (history, system prompt, tools)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ KiroHttpClient  │ ◄── Retry logic (403, 429, 5xx)
-│ (http_client.py)│
-└────────┬────────┘
-         │ POST /generateAssistantResponse
-         ▼
-┌─────────────────┐
-│   Kiro API      │
-└────────┬────────┘
-         │ AWS SSE Stream
-         ▼
-┌─────────────────┐
-│ SSE Parser      │ ◄── Event parsing, tool calls
-│  (parsers.py)   │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ OpenAI Format   │ ◄── Convert to OpenAI SSE
-│ (streaming.py)  │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  OpenAI Client  │
-└─────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                          CLIENTS                                │
+│  ┌─────────────────────┐       ┌─────────────────────┐         │
+│  │  OpenAI Client      │       │  Anthropic Client   │         │
+│  └──────────┬──────────┘       └──────────┬──────────┘         │
+└─────────────┼──────────────────────────────┼───────────────────┘
+              │                              │
+              │ POST /v1/chat/completions    │ POST /v1/messages
+              ▼                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      API LAYER                                  │
+│  ┌─────────────────────┐       ┌─────────────────────┐         │
+│  │  routes_openai.py   │       │ routes_anthropic.py │         │
+│  │  Security Gate      │       │ Security Gate       │         │
+│  └──────────┬──────────┘       └──────────┬──────────┘         │
+│             │                              │                    │
+│             ▼                              ▼                    │
+│  ┌─────────────────────┐       ┌─────────────────────┐         │
+│  │converters_openai.py │       │converters_anthropic │         │
+│  │ Extract system      │       │ System already      │         │
+│  │ from messages       │       │ separate in request │         │
+│  └──────────┬──────────┘       └──────────┬──────────┘         │
+└─────────────┼──────────────────────────────┼───────────────────┘
+              │                              │
+              └──────────────┬───────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      CORE LAYER                                 │
+│             ┌─────────────────────────────┐                     │
+│             │    converters_core.py       │                     │
+│             │  build_kiro_payload()       │                     │
+│             │  build_kiro_history()       │                     │
+│             │  process_tools()            │                     │
+│             └──────────────┬──────────────┘                     │
+└────────────────────────────┼────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     SHARED LAYER                                │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
+│  │ KiroAuthManager │  │ KiroHttpClient  │  │  ModelInfoCache │ │
+│  │   (auth.py)     │  │(http_client.py) │  │   (cache.py)    │ │
+│  └────────┬────────┘  └────────┬────────┘  └─────────────────┘ │
+└───────────┼────────────────────┼────────────────────────────────┘
+            │                    │
+            │                    │ POST /generateAssistantResponse
+            │                    ▼
+            │         ┌─────────────────────────────────────┐
+            │         │              Kiro API                   │
+            │         └──────────────────┬──────────────────────┘
+            │                            │
+            │                            │ AWS SSE Stream
+            │                            ▼
+┌───────────┼────────────────────────────────────────────────────┐
+│           │            CORE LAYER                              │
+│           │  ┌─────────────────────────────┐                   │
+│           │  │    streaming_core.py        │                   │
+│           │  │  parse_kiro_stream()        │                   │
+│           │  │  → KiroEvent objects        │                   │
+│           │  └──────────────┬──────────────┘                   │
+└────────────────────────────┼───────────────────────────────────┘
+                             │
+              ┌──────────────┴───────────────┐
+              │                              │
+              ▼                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      OUTPUT LAYER                               │
+│  ┌─────────────────────┐       ┌─────────────────────┐         │
+│  │streaming_openai.py  │       │streaming_anthropic  │         │
+│  │ format_openai_sse() │       │format_anthropic_sse │         │
+│  │                     │       │                     │         │
+│  │ data: {...}         │       │ event: type         │         │
+│  │ data: [DONE]        │       │ data: {...}         │         │
+│  └──────────┬──────────┘       └──────────┬──────────┘         │
+└─────────────┼──────────────────────────────┼───────────────────┘
+              │                              │
+              ▼                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                          CLIENTS                                │
+│  ┌─────────────────────┐       ┌─────────────────────┐         │
+│  │  OpenAI Client      │       │  Anthropic Client   │         │
+│  └─────────────────────┘       └─────────────────────┘         │
+└─────────────────────────────────┘
+```
+
+### 4.2 OpenAI API Flow
+
+```
+OpenAI Client
+     │ POST /v1/chat/completions
+     ▼
+routes_openai.py ──► converters_openai.py ──► converters_core.py
+     │                                              │
+     │                                              ▼
+     │                                        Kiro Payload
+     │                                              │
+     ▼                                              ▼
+KiroAuthManager ──────────────────────────► KiroHttpClient
+                                                   │
+                                                   ▼
+                                              Kiro API
+                                                   │
+                                                   ▼
+streaming_core.py ◄─────────────────────── AWS SSE Stream
+     │
+     ▼
+streaming_openai.py
+     │
+     ▼
+OpenAI SSE Format ──────────────────────► OpenAI Client
+```
+
+### 4.3 Anthropic API Flow
+
+```
+Anthropic Client
+     │ POST /v1/messages
+     ▼
+routes_anthropic.py ──► converters_anthropic.py ──► converters_core.py
+     │                                                    │
+     │                                                    ▼
+     │                                              Kiro Payload
+     │                                                    │
+     ▼                                                    ▼
+KiroAuthManager ──────────────────────────────────► KiroHttpClient
+                                                         │
+                                                         ▼
+                                                    Kiro API
+                                                         │
+                                                         ▼
+streaming_core.py ◄─────────────────────────────── AWS SSE Stream
+     │
+     ▼
+streaming_anthropic.py
+     │
+     ▼
+Anthropic SSE Format ──────────────────────────► Anthropic Client
 ```
 
 ## 5. Available Models
@@ -489,12 +654,40 @@ TOOL_DESCRIPTION_MAX_LENGTH="10000"
 
 ## 7. API Endpoints
 
+### 7.1 Common Endpoints
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Health check |
 | `/health` | GET | Detailed health check |
+
+### 7.2 OpenAI-compatible Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
 | `/v1/models` | GET | List of available models |
 | `/v1/chat/completions` | POST | Chat completions (streaming/non-streaming) |
+
+**Authentication:** `Authorization: Bearer {PROXY_API_KEY}`
+
+### 7.3 Anthropic-compatible Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/messages` | POST | Messages API (streaming/non-streaming) |
+
+**Authentication:** `x-api-key: {PROXY_API_KEY}` + `anthropic-version: 2023-06-01`
+
+### 7.4 Format Comparison
+
+| Aspect | OpenAI | Anthropic |
+|--------|--------|-----------|
+| System prompt | In `messages` with `role: "system"` | Separate `system` field |
+| Content | String or array | Always array of content blocks |
+| Stop reason | `finish_reason: "stop"` | `stop_reason: "end_turn"` |
+| Usage | `prompt_tokens`, `completion_tokens` | `input_tokens`, `output_tokens` |
+| Streaming | `data: {...}\n\n` + `data: [DONE]` | `event: type\ndata: {...}\n\n` |
+| Tool format | `{type: "function", function: {...}}` | `{name: "...", input_schema: {...}}` |
 
 ## 8. Implementation Features
 
@@ -540,34 +733,78 @@ When `DEBUG_LAST_REQUEST=true`, all requests and responses are logged in `debug_
 
 ## 9. Extensibility
 
-### Adding a New Provider
+### Adding a New API Format
 
-The modular architecture allows easy addition of support for other providers:
+The modular architecture allows easy addition of support for other API formats. Thanks to the Core Layer, most of the logic is already implemented.
 
-1. Create a new module `kiro_gateway/providers/new_provider.py`
-2. Implement classes:
-   - `NewProviderAuthManager` — token management
-   - `NewProviderConverter` — format conversion
-   - `NewProviderParser` — response parsing
-3. Add routes to `routes.py` or create a separate router
+#### Steps to Add a New Format (e.g., Gemini)
 
-### Example Structure for a New Provider
+1. **Create models** — `models_gemini.py`
+   ```python
+   class GeminiRequest(BaseModel):
+       """Pydantic model for Gemini request."""
+       contents: List[GeminiContent]
+       ...
+   ```
 
-```python
-# kiro_gateway/providers/gemini.py
+2. **Create conversion adapter** — `converters_gemini.py`
+   ```python
+   from kiro.converters_core import build_kiro_payload
+   
+   def gemini_to_kiro(request: GeminiRequest, ...) -> dict:
+       """Converts Gemini request to Kiro payload."""
+       # Extract data from Gemini format
+       system_prompt = extract_system_instruction(request)
+       messages = convert_gemini_contents(request.contents)
+       tools = convert_gemini_tools(request.tools)
+       
+       # Use shared core
+       return build_kiro_payload(
+           messages=messages,
+           system_prompt=system_prompt,
+           tools=tools,
+           ...
+       )
+   ```
 
-class GeminiAuthManager:
-    """Gemini API key management."""
-    pass
+3. **Create streaming formatter** — `streaming_gemini.py`
+   ```python
+   from kiro.streaming_core import parse_kiro_stream
+   
+   async def stream_to_gemini(response, ...) -> AsyncGenerator[str, None]:
+       """Formats Kiro events to Gemini SSE."""
+       async for event in parse_kiro_stream(response):
+           yield format_gemini_chunk(event)
+   ```
 
-class GeminiConverter:
-    """OpenAI -> Gemini format conversion."""
-    pass
+4. **Create routes** — `routes_gemini.py`
+   ```python
+   router = APIRouter()
+   
+   @router.post("/v1beta/models/{model}:generateContent")
+   async def generate_content(request: GeminiRequest):
+       ...
+   ```
 
-class GeminiParser:
-    """Gemini SSE stream parsing."""
-    pass
-```
+5. **Connect in main.py**
+   ```python
+   from kiro.routes_gemini import router as gemini_router
+   app.include_router(gemini_router)
+   ```
+
+### What Gets Reused Automatically
+
+When adding a new format, the following components work out of the box:
+
+| Component | Functionality |
+|-----------|---------------|
+| `auth.py` | Kiro token management |
+| `http_client.py` | HTTP with retry logic |
+| `cache.py` | Model cache |
+| `parsers.py` | AWS SSE parsing |
+| `tokenizer.py` | Token counting |
+| `converters_core.py` | Kiro payload building |
+| `streaming_core.py` | Kiro stream parsing |
 
 ## 10. Dependencies
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
-# Kiro OpenAI Gateway
-# https://github.com/jwadow/kiro-openai-gateway
+# Kiro Gateway
+# https://github.com/jwadow/kiro-gateway
 # Copyright (C) 2025 Jwadow
 #
 # This program is free software: you can redistribute it and/or modify
@@ -29,32 +29,31 @@ Contains all API endpoints:
 import json
 from datetime import datetime, timezone
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from loguru import logger
 
-from kiro_gateway.config import (
+from kiro.config import (
     PROXY_API_KEY,
-    AVAILABLE_MODELS,
     APP_VERSION,
 )
-from kiro_gateway.models import (
+from kiro.models_openai import (
     OpenAIModel,
     ModelList,
     ChatCompletionRequest,
 )
-from kiro_gateway.auth import KiroAuthManager, AuthType
-from kiro_gateway.cache import ModelInfoCache
-from kiro_gateway.converters import build_kiro_payload
-from kiro_gateway.streaming import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
-from kiro_gateway.http_client import KiroHttpClient
-from kiro_gateway.utils import get_kiro_headers, generate_conversation_id
+from kiro.auth import KiroAuthManager, AuthType
+from kiro.cache import ModelInfoCache
+from kiro.model_resolver import ModelResolver
+from kiro.converters_openai import build_kiro_payload
+from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
+from kiro.http_client import KiroHttpClient
+from kiro.utils import generate_conversation_id
 
 # Import debug_logger
 try:
-    from kiro_gateway.debug_logger import debug_logger
+    from kiro.debug_logger import debug_logger
 except ImportError:
     debug_logger = None
 
@@ -98,7 +97,7 @@ async def root():
     """
     return {
         "status": "ok",
-        "message": "Kiro API Gateway is running",
+        "message": "Kiro Gateway is running",
         "version": APP_VERSION
     }
 
@@ -117,61 +116,35 @@ async def health():
         "version": APP_VERSION
     }
 
-
 @router.get("/v1/models", response_model=ModelList, dependencies=[Depends(verify_api_key)])
 async def get_models(request: Request):
     """
     Return list of available models.
     
-    Uses static model list with ability to update from API.
-    Caches results to reduce API load.
+    Models are loaded at startup (blocking) and cached.
+    This endpoint returns the cached list.
     
     Args:
         request: FastAPI Request for accessing app.state
     
     Returns:
-        ModelList with available models
+        ModelList with available models in consistent format (with dots)
     """
     logger.info("Request to /v1/models")
     
-    auth_manager: KiroAuthManager = request.app.state.auth_manager
-    model_cache: ModelInfoCache = request.app.state.model_cache
+    model_resolver: ModelResolver = request.app.state.model_resolver
     
-    # Try to get models from API if cache is empty or stale
-    if model_cache.is_empty() or model_cache.is_stale():
-        try:
-            token = await auth_manager.get_access_token()
-            headers = get_kiro_headers(auth_manager, token)
-            
-            # Build params - profileArn is only needed for Kiro Desktop auth
-            # AWS SSO OIDC (Builder ID) users don't need profileArn and it causes 403 if sent
-            params = {"origin": "AI_EDITOR"}
-            if auth_manager.auth_type == AuthType.KIRO_DESKTOP and auth_manager.profile_arn:
-                params["profileArn"] = auth_manager.profile_arn
-            
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.get(
-                    f"{auth_manager.q_host}/ListAvailableModels",
-                    headers=headers,
-                    params=params
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    models_list = data.get("models", [])
-                    await model_cache.update(models_list)
-                    logger.info(f"Received {len(models_list)} models from API")
-        except Exception as e:
-            logger.warning(f"Failed to fetch models from API: {e}")
+    # Get all available models from resolver (cache + hidden models)
+    available_model_ids = model_resolver.get_available_models()
     
-    # Return static model list
+    # Build OpenAI-compatible model list
     openai_models = [
         OpenAIModel(
             id=model_id,
             owned_by="anthropic",
             description="Claude model via Kiro API"
         )
-        for model_id in AVAILABLE_MODELS
+        for model_id in available_model_ids
     ]
     
     return ModelList(data=openai_models)
@@ -201,21 +174,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     auth_manager: KiroAuthManager = request.app.state.auth_manager
     model_cache: ModelInfoCache = request.app.state.model_cache
     
-    # Prepare debug logs
-    if debug_logger:
-        debug_logger.prepare_new_request()
-    
-    # Log incoming request
-    try:
-        request_body = json.dumps(request_data.model_dump(), ensure_ascii=False, indent=2).encode('utf-8')
-        if debug_logger:
-            debug_logger.log_request_body(request_body)
-    except Exception as e:
-        logger.warning(f"Failed to log request body: {e}")
-    
-    # Lazy model cache population
-    if model_cache.is_empty():
-        logger.debug("Model cache is empty, skipping forced population")
+    # Note: prepare_new_request() and log_request_body() are now called by DebugLoggerMiddleware
+    # This ensures debug logging works even for requests that fail Pydantic validation (422 errors)
     
     # Generate conversation ID
     conversation_id = generate_conversation_id()
@@ -245,7 +205,9 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         logger.warning(f"Failed to log Kiro request: {e}")
     
     # Create HTTP client with retry logic
-    http_client = KiroHttpClient(auth_manager)
+    # Use shared HTTP client from app.state for connection pooling
+    shared_client = request.app.state.http_client
+    http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
     url = f"{auth_manager.api_host}/generateAssistantResponse"
     try:
         # Make request to Kiro API (for both streaming and non-streaming modes)

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
-# Kiro OpenAI Gateway
-# https://github.com/jwadow/kiro-openai-gateway
+# Kiro Gateway
+# https://github.com/jwadow/kiro-gateway
 # Copyright (C) 2025 Jwadow
 #
 # This program is free software: you can redistribute it and/or modify
@@ -40,10 +40,15 @@ class AuthType(Enum):
 
 
 # --- Configuration ---
-KIRO_REGION = os.getenv("KIRO_REGION", "us-east-1")
-KIRO_API_HOST = f"https://q.{KIRO_REGION}.amazonaws.com"
-KIRO_DESKTOP_TOKEN_URL = f"https://prod.{KIRO_REGION}.auth.desktop.kiro.dev/refreshToken"
-AWS_SSO_OIDC_TOKEN_URL = f"https://oidc.{KIRO_REGION}.amazonaws.com/token"
+# API region - CodeWhisperer API is only available in us-east-1
+API_REGION = "us-east-1"
+KIRO_API_HOST = f"https://q.{API_REGION}.amazonaws.com"
+KIRO_DESKTOP_TOKEN_URL = f"https://prod.{API_REGION}.auth.desktop.kiro.dev/refreshToken"
+
+# SSO region - may differ from API region (e.g., ap-southeast-1 for Singapore users)
+# This is used only for AWS SSO OIDC token refresh
+SSO_REGION = None
+AWS_SSO_OIDC_TOKEN_URL = None  # Will be set when SSO_REGION is known
 
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
 PROFILE_ARN = os.getenv("PROFILE_ARN", "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK")
@@ -60,8 +65,8 @@ AUTH_TYPE = AuthType.KIRO_DESKTOP
 
 def load_credentials_from_json(file_path: str) -> bool:
     """Load credentials from JSON file."""
-    global REFRESH_TOKEN, PROFILE_ARN, CLIENT_ID, CLIENT_SECRET, AUTH_TYPE, KIRO_REGION
-    global KIRO_API_HOST, KIRO_DESKTOP_TOKEN_URL, AWS_SSO_OIDC_TOKEN_URL
+    global REFRESH_TOKEN, PROFILE_ARN, CLIENT_ID, CLIENT_SECRET, AUTH_TYPE
+    global SSO_REGION, AWS_SSO_OIDC_TOKEN_URL
     
     try:
         creds_path = Path(file_path).expanduser()
@@ -78,10 +83,12 @@ def load_credentials_from_json(file_path: str) -> bool:
         if 'profileArn' in creds_data:
             PROFILE_ARN = creds_data['profileArn']
         if 'region' in creds_data:
-            KIRO_REGION = creds_data['region']
-            KIRO_API_HOST = f"https://q.{KIRO_REGION}.amazonaws.com"
-            KIRO_DESKTOP_TOKEN_URL = f"https://prod.{KIRO_REGION}.auth.desktop.kiro.dev/refreshToken"
-            AWS_SSO_OIDC_TOKEN_URL = f"https://oidc.{KIRO_REGION}.amazonaws.com/token"
+            # Store as SSO region for OIDC token refresh only
+            # IMPORTANT: CodeWhisperer API is only available in us-east-1,
+            # so we don't update KIRO_API_HOST here
+            SSO_REGION = creds_data['region']
+            AWS_SSO_OIDC_TOKEN_URL = f"https://oidc.{SSO_REGION}.amazonaws.com/token"
+            logger.debug(f"SSO region from JSON: {SSO_REGION} (API stays at {API_REGION})")
         
         # Load AWS SSO OIDC specific fields
         if 'clientId' in creds_data:
@@ -107,8 +114,8 @@ def load_credentials_from_json(file_path: str) -> bool:
 
 def load_credentials_from_sqlite(db_path: str) -> bool:
     """Load credentials from kiro-cli SQLite database."""
-    global REFRESH_TOKEN, CLIENT_ID, CLIENT_SECRET, AUTH_TYPE, KIRO_REGION, SCOPES, AUTH_TOKEN
-    global KIRO_API_HOST, KIRO_DESKTOP_TOKEN_URL, AWS_SSO_OIDC_TOKEN_URL
+    global REFRESH_TOKEN, CLIENT_ID, CLIENT_SECRET, AUTH_TYPE, SCOPES, AUTH_TOKEN
+    global SSO_REGION, AWS_SSO_OIDC_TOKEN_URL
     
     try:
         path = Path(db_path).expanduser()
@@ -141,10 +148,12 @@ def load_credentials_from_sqlite(db_path: str) -> bool:
                 if 'scopes' in token_data:
                     SCOPES = token_data['scopes']
                 if 'region' in token_data:
-                    KIRO_REGION = token_data['region']
-                    KIRO_API_HOST = f"https://q.{KIRO_REGION}.amazonaws.com"
-                    KIRO_DESKTOP_TOKEN_URL = f"https://prod.{KIRO_REGION}.auth.desktop.kiro.dev/refreshToken"
-                    AWS_SSO_OIDC_TOKEN_URL = f"https://oidc.{KIRO_REGION}.amazonaws.com/token"
+                    # Store as SSO region for OIDC token refresh only
+                    # IMPORTANT: CodeWhisperer API is only available in us-east-1,
+                    # so we don't update KIRO_API_HOST here
+                    SSO_REGION = token_data['region']
+                    AWS_SSO_OIDC_TOKEN_URL = f"https://oidc.{SSO_REGION}.amazonaws.com/token"
+                    logger.debug(f"SSO region from SQLite: {SSO_REGION} (API stays at {API_REGION})")
         
         # Load device registration (client_id, client_secret) - try both key formats
         cursor.execute("SELECT value FROM auth_kv WHERE key = ?", ("kirocli:odic:device-registration",))
@@ -264,6 +273,10 @@ def refresh_auth_token_aws_sso_oidc():
     global AUTH_TOKEN, HEADERS
     logger.info("Refreshing Kiro token via AWS SSO OIDC...")
     
+    # Determine SSO OIDC URL (use SSO_REGION if set, otherwise fall back to API_REGION)
+    sso_region = SSO_REGION or API_REGION
+    oidc_url = AWS_SSO_OIDC_TOKEN_URL or f"https://oidc.{sso_region}.amazonaws.com/token"
+    
     # AWS SSO OIDC uses form-urlencoded data
     data = {
         "grant_type": "refresh_token",
@@ -272,17 +285,35 @@ def refresh_auth_token_aws_sso_oidc():
         "refresh_token": REFRESH_TOKEN,
     }
     
-    # Add scopes if available
-    if SCOPES:
-        data["scope"] = " ".join(SCOPES)
-    
+    # Note: scope parameter is NOT sent during refresh per OAuth 2.0 RFC 6749 Section 6
+    # AWS SSO OIDC uses the originally granted scopes automatically
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
     }
     
+    # Log request details (without secrets) for debugging
+    logger.debug(f"AWS SSO OIDC refresh request: url={oidc_url}, "
+                 f"sso_region={sso_region}, api_region={API_REGION}, "
+                 f"client_id={CLIENT_ID[:8] if CLIENT_ID else 'None'}...")
+    
     try:
-        response = requests.post(AWS_SSO_OIDC_TOKEN_URL, data=data, headers=headers)
-        response.raise_for_status()
+        response = requests.post(oidc_url, data=data, headers=headers)
+        
+        # Log response details for debugging (especially on errors)
+        if response.status_code != 200:
+            logger.error(f"AWS SSO OIDC refresh failed: status={response.status_code}")
+            logger.error(f"AWS SSO OIDC response body: {response.text}")
+            # Try to parse AWS error for more details
+            try:
+                error_json = response.json()
+                error_code = error_json.get("error", "unknown")
+                error_desc = error_json.get("error_description", "no description")
+                logger.error(f"AWS SSO OIDC error details: error={error_code}, "
+                             f"description={error_desc}")
+            except Exception:
+                pass  # Body wasn't JSON, already logged as text
+            response.raise_for_status()
+        
         result = response.json()
         
         new_token = result.get("accessToken")
@@ -406,7 +437,8 @@ if __name__ == "__main__":
     logger.info(f"Starting Kiro API tests...")
     logger.info(f"  Credentials source: {cred_source}")
     logger.info(f"  Auth type: {AUTH_TYPE.value}")
-    logger.info(f"  Region: {KIRO_REGION}")
+    logger.info(f"  API Region: {API_REGION}")
+    logger.info(f"  SSO Region: {SSO_REGION or 'not set (using API region)'}")
     logger.info(f"  API Host: {KIRO_API_HOST}")
 
     # Check if we already have a valid token from the database
@@ -434,4 +466,6 @@ if __name__ == "__main__":
     else:
         logger.error("Failed to refresh token. Tests not started.")
         logger.error(f"  Auth type: {AUTH_TYPE.value}")
-        logger.error(f"  Token URL: {AWS_SSO_OIDC_TOKEN_URL if AUTH_TYPE == AuthType.AWS_SSO_OIDC else KIRO_DESKTOP_TOKEN_URL}")
+        sso_region = SSO_REGION or API_REGION
+        oidc_url = AWS_SSO_OIDC_TOKEN_URL or f"https://oidc.{sso_region}.amazonaws.com/token"
+        logger.error(f"  Token URL: {oidc_url if AUTH_TYPE == AuthType.AWS_SSO_OIDC else KIRO_DESKTOP_TOKEN_URL}")
