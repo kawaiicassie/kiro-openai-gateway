@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
-# Kiro OpenAI Gateway
-# https://github.com/jwadow/kiro-openai-gateway
+# Kiro Gateway
+# https://github.com/jwadow/kiro-gateway
 # Copyright (C) 2025 Jwadow
 #
 # This program is free software: you can redistribute it and/or modify
@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
-from kiro_gateway.config import (
+from kiro.config import (
     FAKE_REASONING_HANDLING,
     FAKE_REASONING_OPEN_TAGS,
     FAKE_REASONING_INITIAL_BUFFER_SIZE,

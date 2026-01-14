@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
-# Kiro OpenAI Gateway
-# https://github.com/jwadow/kiro-openai-gateway
+# Kiro Gateway
+# https://github.com/jwadow/kiro-gateway
 # Copyright (C) 2025 Jwadow
 #
 # This program is free software: you can redistribute it and/or modify
@@ -77,11 +77,26 @@ def _get_raw_env_value(var_name: str, env_file: str = ".env") -> Optional[str]:
     return None
 
 # ==================================================================================================
+# Server Settings
+# ==================================================================================================
+
+# Server host (default: 0.0.0.0 - listen on all interfaces)
+# Use "127.0.0.1" to only allow local connections
+DEFAULT_SERVER_HOST: str = "0.0.0.0"
+SERVER_HOST: str = os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST)
+
+# Server port (default: 8000)
+# Can be overridden by CLI: python main.py --port 9000
+# Or by uvicorn directly: uvicorn main:app --port 9000
+DEFAULT_SERVER_PORT: int = 8000
+SERVER_PORT: int = int(os.getenv("SERVER_PORT", str(DEFAULT_SERVER_PORT)))
+
+# ==================================================================================================
 # Proxy Server Settings
 # ==================================================================================================
 
 # API key for proxy access (clients must pass it in Authorization header)
-PROXY_API_KEY: str = os.getenv("PROXY_API_KEY", "changeme_proxy_secret")
+PROXY_API_KEY: str = os.getenv("PROXY_API_KEY", "my-super-secret-password-123")
 
 # ==================================================================================================
 # Kiro API Credentials
@@ -158,47 +173,26 @@ MAX_RETRIES: int = 3
 BASE_RETRY_DELAY: float = 1.0
 
 # ==================================================================================================
-# Model Mapping
+# Hidden Models Configuration
 # ==================================================================================================
 
-# External model names (OpenAI-compatible) -> internal Kiro IDs
-# Clients use external names, and we convert them to internal ones
-MODEL_MAPPING: Dict[str, str] = {
-    # Claude Opus 4.5 - top-tier model
-    "claude-opus-4-5": "claude-opus-4.5",
-    "claude-opus-4-5-20251101": "claude-opus-4.5",
+# Hidden models - not returned by Kiro /ListAvailableModels API but still functional.
+# These ARE shown in our /v1/models endpoint!
+# Use dot format for consistency with API models.
+#
+# Format: "display_name" → "internal_kiro_id"
+# Display names use dots (e.g., "claude-3.7-sonnet") for consistency with Kiro API.
+#
+# Why "hidden"? These models work but are not advertised by Kiro's /ListAvailableModels.
+# We expose them to our users because they're useful.
+HIDDEN_MODELS: Dict[str, str] = {
+    # Claude 3.7 Sonnet - legacy flagship model, still works!
+    # Hidden in Kiro API but functional. Great for users who prefer it.
+    "claude-3.7-sonnet": "CLAUDE_3_7_SONNET_20250219_V1_0",
     
-    # Claude Haiku 4.5 - fast model
-    "claude-haiku-4-5": "claude-haiku-4.5",
-    "claude-haiku-4.5": "claude-haiku-4.5",  # Direct passthrough
-    
-    # Claude Sonnet 4.5 - enhanced model
-    "claude-sonnet-4-5": "CLAUDE_SONNET_4_5_20250929_V1_0",
-    "claude-sonnet-4-5-20250929": "CLAUDE_SONNET_4_5_20250929_V1_0",
-    
-    # Claude Sonnet 4 - balanced model
-    "claude-sonnet-4": "CLAUDE_SONNET_4_20250514_V1_0",
-    "claude-sonnet-4-20250514": "CLAUDE_SONNET_4_20250514_V1_0",
-    
-    # Claude 3.7 Sonnet - legacy model
-    "claude-3-7-sonnet-20250219": "CLAUDE_3_7_SONNET_20250219_V1_0",
-    
-    # Aliases for convenience
-    "auto": "claude-sonnet-4.5",
+    # Add other hidden/experimental models here as discovered.
+    # Example: "claude-secret-model": "INTERNAL_SECRET_MODEL_ID",
 }
-
-# List of available models for /v1/models endpoint
-# These models will be displayed to clients as available
-AVAILABLE_MODELS: List[str] = [
-    "claude-opus-4-5",
-    "claude-opus-4-5-20251101",
-    "claude-haiku-4-5",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-5-20250929",
-    "claude-sonnet-4",
-    "claude-sonnet-4-20250514",
-    "claude-3-7-sonnet-20250219",
-]
 
 # ==================================================================================================
 # Model Cache Settings
@@ -214,21 +208,21 @@ DEFAULT_MAX_INPUT_TOKENS: int = 200000
 # Tool Description Handling (Kiro API Limitations)
 # ==================================================================================================
 
-# Kiro API возвращает ошибку 400 "Improperly formed request" при слишком длинных
-# описаниях инструментов в toolSpecification.description.
+# Kiro API returns 400 "Improperly formed request" error when tool descriptions
+# in toolSpecification.description are too long.
 #
-# Решение: Tool Documentation Reference Pattern
-# - Если description ≤ лимита → оставляем как есть
-# - Если description > лимита:
-#   * В toolSpecification.description → ссылка на system prompt:
+# Solution: Tool Documentation Reference Pattern
+# - If description ≤ limit → keep as is
+# - If description > limit:
+#   * In toolSpecification.description → reference to system prompt:
 #     "[Full documentation in system prompt under '## Tool: {name}']"
-#   * В system prompt добавляется секция "## Tool: {name}" с полным описанием
+#   * In system prompt, a section "## Tool: {name}" with full description is added
 #
-# Модель видит явную ссылку и точно понимает, где искать полную документацию.
+# The model sees an explicit reference and knows exactly where to find full documentation.
 
-# Максимальная длина description для tool в символах.
-# Описания длиннее этого лимита будут перенесены в system prompt.
-# Установите 0 для отключения (не рекомендуется - вызовет ошибки Kiro API).
+# Maximum length of tool description in characters.
+# Descriptions longer than this limit will be moved to system prompt.
+# Set to 0 to disable (not recommended - will cause Kiro API errors).
 TOOL_DESCRIPTION_MAX_LENGTH: int = int(os.getenv("TOOL_DESCRIPTION_MAX_LENGTH", "10000"))
 
 # ==================================================================================================
@@ -402,8 +396,8 @@ FAKE_REASONING_INITIAL_BUFFER_SIZE: int = int(os.getenv("FAKE_REASONING_INITIAL_
 # Application Version
 # ==================================================================================================
 
-APP_VERSION: str = "1.0.8"
-APP_TITLE: str = "Kiro API Gateway"
+APP_VERSION: str = "2.0"
+APP_TITLE: str = "Kiro Gateway"
 APP_DESCRIPTION: str = "OpenAI-compatible interface for Kiro API (AWS CodeWhisperer). Made by @jwadow"
 
 
@@ -426,15 +420,3 @@ def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
 
-
-def get_internal_model_id(external_model: str) -> str:
-    """
-    Convert external model name to internal Kiro ID.
-    
-    Args:
-        external_model: External model name (e.g., "claude-sonnet-4-5")
-    
-    Returns:
-        Internal model ID for Kiro API
-    """
-    return MODEL_MAPPING.get(external_model, external_model)

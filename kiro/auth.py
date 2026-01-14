@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
-# Kiro OpenAI Gateway
-# https://github.com/jwadow/kiro-openai-gateway
+# Kiro Gateway
+# https://github.com/jwadow/kiro-gateway
 # Copyright (C) 2025 Jwadow
 #
 # This program is free software: you can redistribute it and/or modify
@@ -38,14 +38,14 @@ from typing import Optional
 import httpx
 from loguru import logger
 
-from kiro_gateway.config import (
+from kiro.config import (
     TOKEN_REFRESH_THRESHOLD,
     get_kiro_refresh_url,
     get_kiro_api_host,
     get_kiro_q_host,
     get_aws_sso_oidc_url,
 )
-from kiro_gateway.utils import get_machine_fingerprint
+from kiro.utils import get_machine_fingerprint
 
 
 class AuthType(Enum):
@@ -135,6 +135,7 @@ class KiroAuthManager:
         self._client_id: Optional[str] = client_id
         self._client_secret: Optional[str] = client_secret
         self._scopes: Optional[list] = None  # OAuth scopes for AWS SSO OIDC
+        self._sso_region: Optional[str] = None  # SSO region for OIDC token refresh (may differ from API region)
         
         self._access_token: Optional[str] = None
         self._expires_at: Optional[datetime] = None
@@ -174,7 +175,7 @@ class KiroAuthManager:
             logger.info("Detected auth type: AWS SSO OIDC (kiro-cli)")
         else:
             self._auth_type = AuthType.KIRO_DESKTOP
-            logger.debug("Using auth type: Kiro Desktop")
+            logger.info("Detected auth type: Kiro Desktop")
     
     def _load_credentials_from_sqlite(self, db_path: str) -> None:
         """
@@ -212,11 +213,12 @@ class KiroAuthManager:
                     if 'refresh_token' in token_data:
                         self._refresh_token = token_data['refresh_token']
                     if 'region' in token_data:
-                        self._region = token_data['region']
-                        # Update URLs for new region
-                        self._refresh_url = get_kiro_refresh_url(self._region)
-                        self._api_host = get_kiro_api_host(self._region)
-                        self._q_host = get_kiro_q_host(self._region)
+                        # Store SSO region for OIDC token refresh only
+                        # IMPORTANT: CodeWhisperer API is only available in us-east-1,
+                        # so we don't update _api_host and _q_host here.
+                        # The SSO region (e.g., ap-southeast-1) is only used for OIDC token refresh.
+                        self._sso_region = token_data['region']
+                        logger.debug(f"SSO region from SQLite: {self._sso_region} (API stays at {self._region})")
                     
                     # Load scopes if available
                     if 'scopes' in token_data:
@@ -248,12 +250,10 @@ class KiroAuthManager:
                         self._client_id = registration_data['client_id']
                     if 'client_secret' in registration_data:
                         self._client_secret = registration_data['client_secret']
-                    # Region from registration takes precedence if not set
-                    if 'region' in registration_data and not self._region:
-                        self._region = registration_data['region']
-                        self._refresh_url = get_kiro_refresh_url(self._region)
-                        self._api_host = get_kiro_api_host(self._region)
-                        self._q_host = get_kiro_q_host(self._region)
+                    # SSO region from registration (fallback if not in token data)
+                    if 'region' in registration_data and not self._sso_region:
+                        self._sso_region = registration_data['region']
+                        logger.debug(f"SSO region from device-registration: {self._sso_region}")
             
             conn.close()
             logger.info(f"Credentials loaded from SQLite database: {db_path}")
@@ -433,6 +433,23 @@ class KiroAuthManager:
         
         return self._expires_at.timestamp() <= threshold
     
+    def is_token_expired(self) -> bool:
+        """
+        Checks if the token is actually expired (not just expiring soon).
+        
+        This is used for graceful degradation when refresh fails but
+        the access token might still be valid for a short time.
+        
+        Returns:
+            True if the token has already expired or if expiration time
+            information is not available
+        """
+        if not self._expires_at:
+            return True  # If no expiration info available, assume expired
+        
+        now = datetime.now(timezone.utc)
+        return now >= self._expires_at
+    
     async def _refresh_token_request(self) -> None:
         """
         Performs a token refresh request.
@@ -512,6 +529,14 @@ class KiroAuthManager:
         
         Used by kiro-cli which authenticates via AWS IAM Identity Center.
         
+        Strategy: Try with current in-memory token first. If it fails with 400
+        (invalid_request - token was invalidated by kiro-cli re-login), reload
+        credentials from SQLite and retry once.
+        
+        This approach handles both scenarios:
+        1. Container successfully refreshed token (uses in-memory token)
+        2. kiro-cli re-login invalidated token (reloads from SQLite on failure)
+        
         Endpoint: https://oidc.{region}.amazonaws.com/token
         Method: POST
         Content-Type: application/x-www-form-urlencoded
@@ -520,6 +545,28 @@ class KiroAuthManager:
         Raises:
             ValueError: If required credentials are not set
             httpx.HTTPError: On HTTP request error
+        """
+        try:
+            await self._do_aws_sso_oidc_refresh()
+        except httpx.HTTPStatusError as e:
+            # 400 = invalid_request, likely stale token after kiro-cli re-login
+            if e.response.status_code == 400 and self._sqlite_db:
+                logger.warning("Token refresh failed with 400, reloading credentials from SQLite and retrying...")
+                self._load_credentials_from_sqlite(self._sqlite_db)
+                await self._do_aws_sso_oidc_refresh()
+            else:
+                raise
+    
+    async def _do_aws_sso_oidc_refresh(self) -> None:
+        """
+        Performs the actual AWS SSO OIDC token refresh.
+        
+        This is the internal implementation called by _refresh_token_aws_sso_oidc().
+        It performs a single refresh attempt with current in-memory credentials.
+        
+        Raises:
+            ValueError: If required credentials are not set
+            httpx.HTTPStatusError: On HTTP error (including 400 for invalid token)
         """
         if not self._refresh_token:
             raise ValueError("Refresh token is not set")
@@ -531,7 +578,9 @@ class KiroAuthManager:
         logger.info("Refreshing Kiro token via AWS SSO OIDC...")
         
         # AWS SSO OIDC uses form-urlencoded data
-        url = get_aws_sso_oidc_url(self._region)
+        # Use SSO region for OIDC endpoint (may differ from API region)
+        sso_region = self._sso_region or self._region
+        url = get_aws_sso_oidc_url(sso_region)
         data = {
             "grant_type": "refresh_token",
             "client_id": self._client_id,
@@ -539,16 +588,35 @@ class KiroAuthManager:
             "refresh_token": self._refresh_token,
         }
         
-        # Add scopes if available (required for some AWS SSO configurations)
-        if self._scopes:
-            data["scope"] = " ".join(self._scopes)
+        # Note: scope parameter is NOT sent during refresh per OAuth 2.0 RFC 6749 Section 6
+        # AWS SSO OIDC uses the originally granted scopes automatically
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
         }
         
+        # Log request details (without secrets) for debugging
+        logger.debug(f"AWS SSO OIDC refresh request: url={url}, sso_region={sso_region}, "
+                     f"api_region={self._region}, client_id={self._client_id[:8]}...")
+        
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(url, data=data, headers=headers)
-            response.raise_for_status()
+            
+            # Log response details for debugging (especially on errors)
+            if response.status_code != 200:
+                error_body = response.text
+                logger.error(f"AWS SSO OIDC refresh failed: status={response.status_code}, "
+                             f"body={error_body}")
+                # Try to parse AWS error for more details
+                try:
+                    error_json = response.json()
+                    error_code = error_json.get("error", "unknown")
+                    error_desc = error_json.get("error_description", "no description")
+                    logger.error(f"AWS SSO OIDC error details: error={error_code}, "
+                                 f"description={error_desc}")
+                except Exception:
+                    pass  # Body wasn't JSON, already logged as text
+                response.raise_for_status()
+            
             result = response.json()
         
         new_access_token = result.get("accessToken")
@@ -578,6 +646,11 @@ class KiroAuthManager:
         Thread-safe method using asyncio.Lock.
         Automatically refreshes the token if it has expired or is about to expire.
         
+        For SQLite mode (kiro-cli): implements graceful degradation when refresh fails.
+        If kiro-cli has been running and refreshing tokens in memory (without persisting
+        to SQLite), the refresh_token in SQLite becomes stale. In this case, we fall back
+        to using the access_token directly until it actually expires.
+        
         Returns:
             Valid access token
         
@@ -585,8 +658,47 @@ class KiroAuthManager:
             ValueError: If unable to obtain access token
         """
         async with self._lock:
-            if not self._access_token or self.is_token_expiring_soon():
+            # Token is valid and not expiring soon - just return it
+            if self._access_token and not self.is_token_expiring_soon():
+                return self._access_token
+            
+            # SQLite mode: reload credentials first, kiro-cli might have updated them
+            if self._sqlite_db and self.is_token_expiring_soon():
+                logger.debug("SQLite mode: reloading credentials before refresh attempt")
+                self._load_credentials_from_sqlite(self._sqlite_db)
+                # Check if reloaded token is now valid
+                if self._access_token and not self.is_token_expiring_soon():
+                    logger.debug("SQLite reload provided fresh token, no refresh needed")
+                    return self._access_token
+            
+            # Try to refresh the token
+            try:
                 await self._refresh_token_request()
+            except httpx.HTTPStatusError as e:
+                # Graceful degradation for SQLite mode when refresh fails twice
+                # This happens when kiro-cli refreshed tokens in memory without persisting
+                if e.response.status_code == 400 and self._sqlite_db:
+                    logger.warning(
+                        "Token refresh failed with 400 after SQLite reload. "
+                        "This may happen if kiro-cli refreshed tokens in memory without persisting."
+                    )
+                    # Check if access_token is still usable
+                    if self._access_token and not self.is_token_expired():
+                        logger.warning(
+                            "Using existing access_token until it expires. "
+                            "Run 'kiro-cli login' when convenient to refresh credentials."
+                        )
+                        return self._access_token
+                    else:
+                        raise ValueError(
+                            "Token expired and refresh failed. "
+                            "Please run 'kiro-cli login' to refresh your credentials."
+                        )
+                # Non-SQLite mode or non-400 error - propagate the exception
+                raise
+            except Exception:
+                # For any other exception, propagate it
+                raise
             
             if not self._access_token:
                 raise ValueError("Failed to obtain access token")
